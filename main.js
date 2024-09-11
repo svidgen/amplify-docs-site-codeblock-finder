@@ -4,20 +4,29 @@ import jsdom from "jsdom";
 import * as prettier from "prettier";
 
 /**
+ * @typedef {Record<string, {data: string, hash: string}>} NamedCodeBlocks
+ */
+
+/**
+ * @typedef {Record<string, PageCodeBlocks>} PageCodeBlocks
+ */
+
+/**
+ * @param {string} url
+ * @returns {Document}
+ */
+async function getHTMLDocument(url) {
+  const data = await fetch(url).then((result) => result.text());
+  const dom = new jsdom.JSDOM(data);
+  return dom.window.document;
+}
+
+/**
  * @param {string} data
  * @returns {string}
  */
 function generateHash(data) {
   return createHash("sha256").update(data, "utf-8").digest("hex");
-}
-
-/**
- * @param {string} file path to file
- */
-function pagePreTags(filepath) {
-  const html = readFileSync(filepath).toString();
-  const dom = new jsdom.JSDOM(html);
-  return dom.window.document.getElementsByTagName("pre");
 }
 
 /**
@@ -65,34 +74,73 @@ function innerTextPreservingNewlines(node) {
 
 /**
  * @param {HTMLPreElement} tag
+ * @param {boolean} verbose - Whether to log `prettier` errors. Default `false`.
  */
-async function format(tag) {
+async function format(tag, verbose = false) {
   let code = innerTextPreservingNewlines(tag);
   try {
     code = await prettier.format(code, { parser: "typescript" });
   } catch (err) {
-    console.log("\n");
-    console.error(err);
-    console.log("\n\n");
+    if (verbose) {
+      console.log("\n");
+      console.error(err);
+      console.log("\n\n");
+    }
   }
   return code;
 }
 
 /**
- * @type {Map<string, {data: string, hash: string}>}
+ * @param {Document} doc
+ * @returns {NamedCodeBlocks}
  */
-const results = new Map();
+async function getPageCodeBlocks(doc) {
+  /**
+   * @type {NamedCodeBlocks}
+   */
+  const results = {};
 
-const page = "./sample-data/setup-data.html";
-for (const pre of pagePreTags(page)) {
-  const snippetName = codeblockFilename(pre);
-  if (!isTS(snippetName)) {
-    console.log(`Skipping ${snippetName} ...`);
-    continue;
+  for (const pre of doc.getElementsByTagName("pre")) {
+    const snippetName = codeblockFilename(pre);
+    if (!isTS(snippetName)) continue;
+    const code = await format(pre);
+    const hash = generateHash(code);
+    results[snippetName] = { code, hash };
   }
-  const code = await format(pre);
-  const hash = generateHash(code);
-  results.set(`${page}:${snippetName}`, { code, hash });
+
+  return results;
 }
 
-console.log(JSON.stringify(Object.fromEntries(results.entries()), null, 2));
+/**
+ *
+ * @param {string[]} pages
+ * @returns {PageCodeBlocks}
+ */
+async function getAll(urls) {
+  /**
+   * @type {PageCodeBlocks}
+   */
+  const results = {};
+
+  for (const url of urls) {
+    console.log(`processing ${url}`);
+    const dom = await getHTMLDocument(url);
+    results[url] = await getPageCodeBlocks(dom);
+  }
+
+  return results;
+}
+
+async function findPages() {
+  const sitemapURL = "https://docs.amplify.aws/sitemap.xml";
+  const locTags = (await getHTMLDocument(sitemapURL)).getElementsByTagName(
+    "loc"
+  );
+  return [...locTags]
+    .map((t) => t.innerHTML)
+    .filter((h) => h.includes("react/build-a-backend/data/"));
+}
+
+const urls = await findPages();
+const results = await getAll(urls);
+console.log(JSON.stringify(results, null, 2));
